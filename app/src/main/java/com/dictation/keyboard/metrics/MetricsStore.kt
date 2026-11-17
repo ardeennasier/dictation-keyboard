@@ -30,6 +30,9 @@ data class SessionMetrics(
     val peakPssMb: Int,
     /** Whole-phone battery charge used during the session, if the phone reports it and wasn't charging. */
     val chargeUsedUah: Long?,
+    /** Total clean-up time across blocks, and how blocks were cleaned (e.g. "ai×3", "light×1"). */
+    val cleanupMs: Long = 0,
+    val cleanup: String = "",
 ) {
     val realTimeFactor: Double get() = if (audioSec > 0) asrBusyMs / 1000.0 / audioSec else 0.0
 
@@ -37,6 +40,7 @@ data class SessionMetrics(
         put("t", timestamp); put("src", source); put("model", modelId); put("audio", audioSec)
         put("phrases", phrases); put("stop", stopToTextMs); put("asr", asrBusyMs); put("pss", peakPssMb)
         if (chargeUsedUah != null) put("uah", chargeUsedUah)
+        put("cms", cleanupMs); put("cm", cleanup)
     }
 
     companion object {
@@ -44,6 +48,7 @@ data class SessionMetrics(
             o.getLong("t"), o.getString("src"), o.getString("model"), o.getDouble("audio"),
             o.getInt("phrases"), o.getLong("stop"), o.getLong("asr"), o.getInt("pss"),
             if (o.has("uah")) o.getLong("uah") else null,
+            o.optLong("cms", 0), o.optString("cm", ""),
         )
     }
 }

@@ -41,12 +41,13 @@ object MetricsReport {
             appendLine()
             appendLine(summary(list))
             appendLine()
-            appendLine("time, source, model, audio s, phrases, stop→text ms, asr ms, RTF, peak MB, µAh")
+            appendLine("time, source, model, audio s, blocks, stop→text ms, asr ms, RTF, peak MB, µAh, cleanup ms, cleanup")
             list.forEach {
                 appendLine(
-                    "%s, %s, %s, %.1f, %d, %d, %d, %.3f, %d, %s".format(
+                    "%s, %s, %s, %.1f, %d, %d, %d, %.3f, %d, %s, %d, %s".format(
                         fmt.format(Date(it.timestamp)), it.source, it.modelId, it.audioSec, it.phrases,
                         it.stopToTextMs, it.asrBusyMs, it.realTimeFactor, it.peakPssMb, it.chargeUsedUah?.toString() ?: "-",
+                        it.cleanupMs, it.cleanup,
                     ),
                 )
             }

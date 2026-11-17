@@ -83,6 +83,7 @@ fun KeyboardScreen(c: KeyboardController) {
         val live by c.liveText.collectAsState()
         val levels by c.levels.collectAsState()
         val pending by c.pending.collectAsState()
+        val undo by c.undo.collectAsState()
         val engine by c.engineState.collectAsState()
 
         Surface(color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
@@ -94,7 +95,7 @@ fun KeyboardScreen(c: KeyboardController) {
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
                 Box(Modifier.fillMaxWidth().weight(1f)) {
-                    TopArea(status, live, pending, engine, c)
+                    TopArea(status, live, pending != null, undo != null, engine, c)
                 }
                 Waveform(
                     levels = levels,
@@ -120,7 +121,7 @@ fun KeyboardScreen(c: KeyboardController) {
 }
 
 @Composable
-private fun TopArea(status: KbStatus, live: String, pending: String?, engine: EngineState, c: KeyboardController) {
+private fun TopArea(status: KbStatus, live: String, hasPending: Boolean, canUndo: Boolean, engine: EngineState, c: KeyboardController) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     when (status) {
         KbStatus.Recording, KbStatus.Finishing -> {
@@ -150,10 +151,15 @@ private fun TopArea(status: KbStatus, live: String, pending: String?, engine: En
             modifier = Modifier.fillMaxSize().clickable { c.onMessageTap() }.padding(4.dp),
         )
         KbStatus.Idle -> {
-            if (pending != null) {
+            if (hasPending) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     AssistChip(onClick = c::insertPending, label = { Text("Insert last dictation") })
                     IconButton(onClick = c::dismissPending) { Icon(Icons.Filled.Close, "Discard last dictation") }
+                }
+            } else if (canUndo) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AssistChip(onClick = c::undoCleanup, label = { Text("Undo clean-up") })
+                    IconButton(onClick = c::dismissUndo) { Icon(Icons.Filled.Close, "Keep the cleaned text") }
                 }
             } else {
                 Text(

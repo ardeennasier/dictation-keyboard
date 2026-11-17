@@ -1,6 +1,7 @@
 package com.dictation.keyboard.settings
 
 import android.content.Context
+import com.dictation.keyboard.cleanup.CleanupStrength
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -12,6 +13,16 @@ class AppSettings(context: Context) {
 
     private val _paragraphPauseSec = MutableStateFlow(prefs.getFloat(KEY_PARAGRAPH, 2.0f))
     val paragraphPauseSec: StateFlow<Float> = _paragraphPauseSec
+
+    private val _cleanup = MutableStateFlow(
+        runCatching { CleanupStrength.valueOf(prefs.getString(KEY_CLEANUP, null) ?: "") }.getOrDefault(CleanupStrength.STRONG),
+    )
+    val cleanupStrength: StateFlow<CleanupStrength> = _cleanup
+
+    fun setCleanupStrength(s: CleanupStrength) {
+        prefs.edit().putString(KEY_CLEANUP, s.name).apply()
+        _cleanup.value = s
+    }
 
     fun setSelectedModel(id: String?) {
         prefs.edit().putString(KEY_MODEL, id).apply()
@@ -26,5 +37,6 @@ class AppSettings(context: Context) {
     private companion object {
         const val KEY_MODEL = "selected_model"
         const val KEY_PARAGRAPH = "paragraph_pause_sec"
+        const val KEY_CLEANUP = "cleanup_strength"
     }
 }

@@ -68,6 +68,10 @@ import com.dictation.keyboard.BuildConfig
 import com.dictation.keyboard.app
 import com.dictation.keyboard.asr.EngineState
 import com.dictation.keyboard.asr.FileTest
+import com.dictation.keyboard.cleanup.AiStatus
+import com.dictation.keyboard.cleanup.CleanupResult
+import com.dictation.keyboard.cleanup.CleanupStrength
+import com.google.mlkit.genai.common.DownloadStatus
 import com.dictation.keyboard.ime.KeyboardTheme
 import com.dictation.keyboard.metrics.MetricsReport
 import kotlinx.coroutines.Dispatchers
@@ -239,6 +243,8 @@ private fun MainScreen() {
             )
         }
 
+        CleanupSection()
+
         Section("Try it here") {
             var text by remember { mutableStateOf("") }
             OutlinedTextField(
@@ -252,6 +258,94 @@ private fun MainScreen() {
         FileTestSection()
         MetricsSection()
         Spacer(Modifier.height(32.dp))
+    }
+}
+
+@Composable
+private fun CleanupSection() {
+    val ctx = LocalContext.current
+    val app = ctx.app
+    val scope = rememberCoroutineScope()
+    val strength by app.settings.cleanupStrength.collectAsState()
+    var aiStatus by remember { mutableStateOf<AiStatus?>(null) }
+    var refresh by remember { mutableIntStateOf(0) }
+    var downloadMsg by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(refresh) { aiStatus = app.cleaner.aiStatus(refresh = true) }
+
+    Section("Clean-up") {
+        Text(
+            "Removes fillers, repeats, false starts and self-corrections. It only ever deletes words, never adds or rewords them.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        listOf(
+            CleanupStrength.OFF to "Off: exactly what you said",
+            CleanupStrength.LIGHT to "Light: um/uh and stutters (\"the the\")",
+            CleanupStrength.STRONG to "Strong: also false starts and self-corrections (uses on-device AI)",
+        ).forEach { (value, label) ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(selected = strength == value, onClick = { app.settings.setCleanupStrength(value) })
+                Text(label, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+        Text(
+            "On-device AI (Gemini Nano): " + when (val st = aiStatus) {
+                null -> "checking…"
+                AiStatus.Available -> "available ✓"
+                AiStatus.Downloadable -> "supported, not downloaded yet"
+                AiStatus.Downloading -> "downloading…"
+                AiStatus.Unavailable -> "not available on this phone. Strong works like Light for now."
+                is AiStatus.Error -> "error: ${st.message}"
+            },
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (aiStatus == AiStatus.Downloadable) {
+            Button(onClick = {
+                downloadMsg = "Starting…"
+                scope.launch {
+                    try {
+                        app.cleaner.downloadAi().collect { d ->
+                            downloadMsg = when (d) {
+                                is DownloadStatus.DownloadStarted -> "Downloading (by Android's AICore)…"
+                                is DownloadStatus.DownloadProgress -> "Downloaded %.0f MB…".format(d.totalBytesDownloaded / 1e6)
+                                is DownloadStatus.DownloadCompleted -> "Done."
+                                is DownloadStatus.DownloadFailed -> "Failed: ${d.e.message}"
+                                else -> downloadMsg
+                            }
+                        }
+                    } catch (e: Exception) {
+                        downloadMsg = "Failed: ${e.message}"
+                    }
+                    refresh++
+                }
+            }) { Text("Download Gemini Nano") }
+            Text(
+                "Android's AICore service downloads it, not this app (which has no internet access). Needs a connection once.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        downloadMsg?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        TextButton(onClick = { refresh++ }) { Text("Re-check") }
+
+        var input by remember { mutableStateOf("So um I think we should, we should meet on Tuesday, no, Wednesday. Let's see how the how this works.") }
+        var output by remember { mutableStateOf<CleanupResult?>(null) }
+        var busy by remember { mutableStateOf(false) }
+        OutlinedTextField(
+            value = input,
+            onValueChange = { input = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Try clean-up on any text") },
+        )
+        Button(enabled = !busy, onClick = {
+            busy = true
+            scope.launch {
+                output = app.cleaner.clean(input, strength)
+                busy = false
+            }
+        }) { Text(if (busy) "Cleaning…" else "Clean up") }
+        output?.let { r ->
+            SelectionContainer { Text(r.text, style = MaterialTheme.typography.bodyMedium) }
+            Text("${r.method}, ${r.ms} ms" + (r.note?.let { " ($it)" } ?: ""), style = MaterialTheme.typography.bodySmall)
+        }
     }
 }
 
@@ -301,13 +395,19 @@ private fun FileTestSection() {
         result?.let { r ->
             val m = r.metrics
             Text(
-                "%.1f s of audio, %d phrases. Stop→text %d ms. Real-time factor %.3f. Peak memory %d MB.".format(
-                    m.audioSec, m.phrases, m.stopToTextMs, m.realTimeFactor, m.peakPssMb,
+                "%.1f s of audio, %d blocks. Stop→text %d ms. Real-time factor %.3f. Peak memory %d MB. Clean-up %d ms (%s).".format(
+                    m.audioSec, m.phrases, m.stopToTextMs, m.realTimeFactor, m.peakPssMb, m.cleanupMs, m.cleanup,
                 ),
                 style = MaterialTheme.typography.bodySmall,
             )
-            SelectionContainer { Text(r.text, style = MaterialTheme.typography.bodyMedium) }
-            TextButton(onClick = { copy(ctx, "Transcript", r.text) }) { Text("Copy transcript") }
+            Text("Cleaned", style = MaterialTheme.typography.labelLarge)
+            SelectionContainer { Text(r.transcript.cleaned, style = MaterialTheme.typography.bodyMedium) }
+            Text("Exact transcript", style = MaterialTheme.typography.labelLarge)
+            SelectionContainer { Text(r.transcript.raw, style = MaterialTheme.typography.bodyMedium) }
+            r.transcript.notes.forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { copy(ctx, "Transcript", "CLEANED:\n${r.transcript.cleaned}\n\nRAW:\n${r.transcript.raw}") }) { Text("Copy both") }
+            }
         }
     }
 }

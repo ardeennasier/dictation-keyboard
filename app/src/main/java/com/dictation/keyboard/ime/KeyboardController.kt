@@ -27,6 +27,12 @@ import kotlinx.coroutines.withContext
 import kotlin.math.log10
 import kotlin.math.sqrt
 
+/** Text waiting to be inserted (cleaned) plus the exact transcript, for "Undo clean-up". */
+data class Dictated(val cleaned: String, val raw: String)
+
+/** What was just inserted, so "Undo clean-up" can swap it for the raw transcript. */
+data class UndoInfo(val inserted: String, val rawFormatted: String)
+
 sealed interface KbStatus {
     data object Idle : KbStatus
     data object Recording : KbStatus
@@ -54,8 +60,11 @@ class KeyboardController(
     val levels: StateFlow<List<Float>> = _levels
 
     /** Text from a dictation that couldn't be inserted (keyboard closed mid-way). */
-    private val _pending = MutableStateFlow<String?>(null)
-    val pending: StateFlow<String?> = _pending
+    private val _pending = MutableStateFlow<Dictated?>(null)
+    val pending: StateFlow<Dictated?> = _pending
+
+    private val _undo = MutableStateFlow<UndoInfo?>(null)
+    val undo: StateFlow<UndoInfo?> = _undo
 
     val engineState: StateFlow<EngineState> get() = app.engine.state
 
@@ -81,6 +90,7 @@ class KeyboardController(
     }
 
     fun onHidden() {
+        _undo.value = null
         // Keyboard closed while recording: finish, but don't insert into whatever field comes next.
         if (_status.value == KbStatus.Recording) stop(insert = false)
     }
@@ -109,6 +119,7 @@ class KeyboardController(
             return
         }
         _pending.value = null
+        _undo.value = null
         synchronized(lock) { earlyAudio.clear(); target = null }
         val rec = MicRecorder { chunk -> onAudio(chunk) }
         try {
@@ -130,7 +141,10 @@ class KeyboardController(
                 abort((app.engine.state.value as? EngineState.Failed)?.message ?: "Couldn't load the speech model")
                 return@launch
             }
-            val s = DictationSession(engine, app.settings.paragraphPauseSec.value, app.appScope, app.engine.dispatcher)
+            val s = DictationSession(
+                engine, app.settings.paragraphPauseSec.value, app.appScope, app.engine.dispatcher,
+                app.cleaner, app.settings.cleanupStrength.value,
+            )
             s.start()
             session = s
             synchronized(lock) {
@@ -175,7 +189,7 @@ class KeyboardController(
                 abort("Speech model took too long to load")
                 return@launch
             }
-            val raw = s.finish()
+            val result = s.finish()
             liveJob?.cancel()
             session = null
             synchronized(lock) { target = null }
@@ -183,12 +197,13 @@ class KeyboardController(
             probe = null
             _levels.value = List(WAVE_BARS) { 0f }
 
-            if (raw.isBlank()) {
+            if (result.raw.isBlank()) {
                 _status.value = KbStatus.Message("Didn't catch anything. Try again.")
                 return@launch
             }
-            val inserted = insert && commit(raw)
-            if (!inserted) _pending.value = raw
+            val dictated = Dictated(cleaned = result.cleaned, raw = result.raw)
+            val inserted = insert && insertDictated(dictated)
+            if (!inserted) _pending.value = dictated
             val ms = SystemClock.elapsedRealtime() - stopAt
             app.metrics.add(
                 SessionMetrics(
@@ -196,8 +211,14 @@ class KeyboardController(
                     modelId = s.modelId,
                     audioSec = s.audioSeconds, phrases = s.phraseCount, stopToTextMs = ms,
                     asrBusyMs = s.asrBusyMs, peakPssMb = pss, chargeUsedUah = uah,
+                    cleanupMs = result.cleanupMs, cleanup = result.methodSummary,
                 ),
             )
+            if (result.cleaned.isBlank()) {
+                _liveText.value = ""
+                _status.value = KbStatus.Message("Only filler words, so nothing was inserted.")
+                return@launch
+            }
             _liveText.value = ""
             _status.value = KbStatus.Idle
         }
@@ -219,31 +240,58 @@ class KeyboardController(
 
     fun insertPending() {
         val p = _pending.value ?: return
-        if (commit(p)) _pending.value = null
+        if (insertDictated(p)) _pending.value = null
     }
 
     fun dismissPending() {
         _pending.value = null
     }
 
-    private fun commit(raw: String): Boolean {
+    /** Inserts the cleaned text and remembers the raw version for "Undo clean-up". */
+    private fun insertDictated(d: Dictated): Boolean {
+        if (d.cleaned.isBlank()) return true
         val ic = service.currentInputConnection ?: return false
         val before = ic.getTextBeforeCursor(64, 0)
         val after = ic.getTextAfterCursor(16, 0)
-        val text = InsertionFormatter.format(raw, before, after)
+        val text = InsertionFormatter.format(d.cleaned, before, after)
         ic.beginBatchEdit()
         val ok = ic.commitText(text, 1)
         ic.endBatchEdit()
+        if (ok && d.cleaned != d.raw) {
+            _undo.value = UndoInfo(inserted = text, rawFormatted = InsertionFormatter.format(d.raw, before, after))
+        }
         return ok
     }
 
+    /** Swaps the just-inserted cleaned text for the exact transcript, if the cursor hasn't moved. */
+    fun undoCleanup() {
+        val u = _undo.value ?: return
+        _undo.value = null
+        val ic = service.currentInputConnection ?: return
+        val before = ic.getTextBeforeCursor(u.inserted.length, 0)?.toString()
+        if (before != u.inserted) {
+            _status.value = KbStatus.Message("Can't undo: the text has changed since it was inserted.")
+            return
+        }
+        ic.beginBatchEdit()
+        ic.deleteSurroundingText(u.inserted.length, 0)
+        ic.commitText(u.rawFormatted, 1)
+        ic.endBatchEdit()
+    }
+
+    fun dismissUndo() {
+        _undo.value = null
+    }
+
     fun backspace() {
+        _undo.value = null
         val ic = service.currentInputConnection ?: return
         val selected = ic.getSelectedText(0)
         if (!selected.isNullOrEmpty()) ic.commitText("", 1) else service.sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
     }
 
     fun enter() {
+        _undo.value = null
         val ic = service.currentInputConnection ?: return
         val ei: EditorInfo? = service.currentInputEditorInfo
         val options = ei?.imeOptions ?: 0

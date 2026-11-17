@@ -16,7 +16,7 @@ import kotlinx.coroutines.withContext
  */
 object FileTest {
 
-    class Result(val text: String, val metrics: SessionMetrics)
+    class Result(val transcript: Transcript, val metrics: SessionMetrics)
 
     suspend fun run(app: DictationApp, uri: Uri, realTime: Boolean, onProgress: (String) -> Unit): Result {
         onProgress("Decoding audio…")
@@ -26,7 +26,10 @@ object FileTest {
         val engine = app.engine.get() ?: error("No speech model installed")
 
         val probe = app.metrics.startProbe(app.appScope)
-        val session = DictationSession(engine, app.settings.paragraphPauseSec.value, app.appScope, app.engine.dispatcher)
+        val session = DictationSession(
+            engine, app.settings.paragraphPauseSec.value, app.appScope, app.engine.dispatcher,
+            app.cleaner, app.settings.cleanupStrength.value,
+        )
         session.start()
         val chunk = 512
         val totalSec = samples.size / 16_000.0
@@ -52,7 +55,7 @@ object FileTest {
         }
         onProgress("Finishing…")
         val stopAt = SystemClock.elapsedRealtime()
-        val text = session.finish()
+        val transcript = session.finish()
         val stopToText = SystemClock.elapsedRealtime() - stopAt
         val (pss, uah) = probe.stop()
         val m = SessionMetrics(
@@ -65,8 +68,10 @@ object FileTest {
             asrBusyMs = session.asrBusyMs,
             peakPssMb = pss,
             chargeUsedUah = uah,
+            cleanupMs = transcript.cleanupMs,
+            cleanup = transcript.methodSummary,
         )
         app.metrics.add(m)
-        return Result(text, m)
+        return Result(transcript, m)
     }
 }

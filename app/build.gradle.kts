@@ -9,7 +9,7 @@ val modelsUrl: String = (project.findProperty("modelsUrl") as String?) ?: ""
 
 android {
     namespace = "com.dictation.keyboard"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.dictation.keyboard"
@@ -45,7 +45,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
     buildFeatures {
         compose = true
         buildConfig = true
@@ -54,6 +53,10 @@ android {
         // Native libs stay uncompressed so they can be mmapped straight from the APK.
         jniLibs { useLegacyPackaging = false }
     }
+}
+
+kotlin {
+    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
 
 dependencies {
@@ -70,6 +73,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
     implementation("androidx.savedstate:savedstate-ktx:1.2.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // Gemini Nano via Android's AICore (only on phones that ship it).
+    implementation("com.google.mlkit:genai-prompt:1.0.0-beta5")
 
     testImplementation("junit:junit:4.13.2")
 }

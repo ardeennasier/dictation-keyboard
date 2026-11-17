@@ -3,6 +3,8 @@ package com.dictation.keyboard
 import android.app.Application
 import android.content.Context
 import com.dictation.keyboard.asr.EngineHolder
+import com.dictation.keyboard.cleanup.Cleaner
+import com.dictation.keyboard.cleanup.GeminiNanoBackend
 import com.dictation.keyboard.metrics.MetricsStore
 import com.dictation.keyboard.model.ModelStore
 import com.dictation.keyboard.settings.AppSettings
@@ -16,6 +18,7 @@ class DictationApp : Application() {
     lateinit var models: ModelStore private set
     lateinit var engine: EngineHolder private set
     lateinit var metrics: MetricsStore private set
+    lateinit var cleaner: Cleaner private set
 
     override fun onCreate() {
         super.onCreate()
@@ -23,6 +26,7 @@ class DictationApp : Application() {
         models = ModelStore(this)
         engine = EngineHolder(models, settings, appScope)
         metrics = MetricsStore(this)
+        cleaner = Cleaner(GeminiNanoBackend())
     }
 }
 

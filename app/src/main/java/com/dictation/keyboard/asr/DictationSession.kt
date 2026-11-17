@@ -1,5 +1,7 @@
 package com.dictation.keyboard.asr
 
+import com.dictation.keyboard.cleanup.Cleaner
+import com.dictation.keyboard.cleanup.CleanupStrength
 import com.dictation.keyboard.text.TranscriptAssembler
 import com.k2fsa.sherpa.onnx.SileroVadModelConfig
 import com.k2fsa.sherpa.onnx.Vad
@@ -28,11 +30,27 @@ import kotlin.math.sqrt
  * Blocks are transcribed while you keep talking; when you stop, only the last block is left
  * (and pending previews are skipped), so stop-to-text stays short.
  */
+/** What one dictation produced: the exact transcript and the cleaned-up version. */
+data class Transcript(
+    val raw: String,
+    val cleaned: String,
+    /** Total clean-up time; only the last block's part of it is felt after you tap stop. */
+    val cleanupMs: Long,
+    /** How each block was cleaned: "off", "light", "ai", "ai-rejected". */
+    val methods: List<String>,
+    val notes: List<String>,
+) {
+    val methodSummary: String
+        get() = methods.groupingBy { it }.eachCount().entries.joinToString(" ") { "${it.key}×${it.value}" }
+}
+
 class DictationSession(
     private val engine: SpeechEngine,
     paragraphPauseSec: Float,
     private val scope: CoroutineScope,
     private val asrDispatcher: kotlinx.coroutines.CoroutineDispatcher,
+    private val cleaner: Cleaner,
+    private val strength: CleanupStrength,
 ) {
     private class Phrase(val samples: FloatArray, val startSec: Double, val endSec: Double) {
         val durationSec: Double get() = endSec - startSec
@@ -46,6 +64,15 @@ class DictationSession(
     private val audio = Channel<FloatArray>(Channel.UNLIMITED)
     private val jobs = Channel<AsrJob>(Channel.UNLIMITED)
     private val assembler = TranscriptAssembler(paragraphPauseSec)
+
+    // Clean-up runs on its own coroutine, block by block, while you keep talking.
+    private class RawBlock(val text: String, val startSec: Double, val endSec: Double)
+    private val toClean = Channel<RawBlock>(Channel.UNLIMITED)
+    private val cleanAssembler = TranscriptAssembler(paragraphPauseSec)
+    private var cleanJob: Job? = null
+    @Volatile private var cleanupMs = 0L
+    private val methods = ArrayList<String>()
+    private val notes = ArrayList<String>()
 
     // Owned by the VAD coroutine.
     private val openBlock = ArrayList<Phrase>()
@@ -103,7 +130,17 @@ class DictationSession(
                 jobs.close()
             }
         }
+        cleanJob = scope.launch(Dispatchers.Default) {
+            for (b in toClean) {
+                val r = cleaner.clean(b.text, strength)
+                cleanupMs += r.ms
+                methods.add(r.method)
+                r.note?.let { notes.add(it) }
+                cleanAssembler.add(r.text, b.startSec, b.endSec)
+            }
+        }
         asrJob = scope.launch(asrDispatcher) {
+          try {
             for (job in jobs) {
                 when (job) {
                     is AsrJob.Preview -> {
@@ -115,6 +152,7 @@ class DictationSession(
                         val text = timed { engine.transcribe(job.samples) }
                         phraseCount++
                         assembler.add(text, job.startSec, job.endSec)
+                        toClean.trySend(RawBlock(text, job.startSec, job.endSec))
                         previewTexts.clear() // this block's previews are superseded
                     }
                 }
@@ -122,6 +160,9 @@ class DictationSession(
                     .filter { it.isNotEmpty() }
                     .joinToString(" ")
             }
+          } finally {
+            toClean.close()
+          }
         }
     }
 
@@ -178,19 +219,27 @@ class DictationSession(
     }
 
     /** No more audio: finish the last phrase and return the full text. */
-    suspend fun finish(): String {
+    suspend fun finish(): Transcript {
         finishing = true
         _level.value = 0f
         audio.close()
         vadJob?.join()
         asrJob?.join()
-        return assembler.finish()
+        cleanJob?.join()
+        return Transcript(
+            raw = assembler.finish(),
+            cleaned = cleanAssembler.finish(),
+            cleanupMs = cleanupMs,
+            methods = methods.toList(),
+            notes = notes.toList(),
+        )
     }
 
     fun cancel() {
         audio.close()
         vadJob?.cancel()
         asrJob?.cancel()
+        cleanJob?.cancel()
     }
 
     private companion object {
