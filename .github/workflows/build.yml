@@ -54,20 +54,25 @@ jobs:
 
       - name: Set up signing key
         env:
-          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
         run: |
-          if [ -n "${KEYSTORE_B64}" ]; then
-            echo "${KEYSTORE_B64}" | base64 -d > /tmp/release.jks
-            echo "SIGNING_KEYSTORE_PATH=/tmp/release.jks" >> "$GITHUB_ENV"
+          # The keystore is committed encrypted (signing/release.jks.enc); only the
+          # SIGNING_PASSWORD repo secret can unlock it. Same key every build, so updates
+          # install over the previous version and keep your imported model.
+          if [ -n "${SIGNING_PASSWORD}" ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in signing/release.jks.enc \
+              -out /tmp/release.jks -pass env:SIGNING_PASSWORD
+            {
+              echo "SIGNING_KEYSTORE_PATH=/tmp/release.jks"
+              echo "SIGNING_STORE_PASSWORD=${SIGNING_PASSWORD}"
+              echo "SIGNING_KEY_PASSWORD=${SIGNING_PASSWORD}"
+              echo "SIGNING_KEY_ALIAS=dictation"
+            } >> "$GITHUB_ENV"
           else
-            echo "::warning::No SIGNING_KEYSTORE_B64 secret: using a throwaway debug key. Updates won't install over each other."
+            echo "::warning::No SIGNING_PASSWORD secret: using a throwaway debug key. Each build will need uninstalling the previous one."
           fi
 
       - name: Unit tests and build
-        env:
-          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
           gradle --no-daemon testReleaseUnitTest assembleRelease \
             -PversionCode=${{ github.run_number }} \

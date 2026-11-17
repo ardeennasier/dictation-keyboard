@@ -1,10 +1,13 @@
 name: Package speech models
 
-# Run this once by hand (Actions tab > Package speech models > Run workflow).
+# Runs when this file changes, or by hand (Actions tab > Package speech models > Run workflow).
 # It downloads the open models from the sherpa-onnx project, adds the manifest the app expects,
 # and attaches them to a "models-v1" release you can download on your phone.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/models.yml"]
 
 permissions:
   contents: write
