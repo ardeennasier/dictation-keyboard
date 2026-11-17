@@ -57,7 +57,29 @@ jobs:
           JSON
           (cd ms && zip -0 -q ../models-moonshine-base-english.zip *)
 
-          python3 -c "import json; [json.load(open(p)) for p in ('pk/manifest.json','ms/manifest.json')]"
+          # 3. Parakeet TDT 0.6B v2, half precision (fp16): larger, for comparing accuracy.
+          curl -fsSL "$BASE/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16.tar.bz2" | tar xj
+          D=sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16
+          ls -la "$D"
+          ENC=$(cd "$D" && ls encoder*.onnx | head -1)
+          DEC=$(cd "$D" && ls decoder*.onnx | head -1)
+          JOI=$(cd "$D" && ls joiner*.onnx | head -1)
+          mkdir pf
+          cp "$D/$ENC" "$D/$DEC" "$D/$JOI" "$D/tokens.txt" silero_vad.onnx pf/
+          # Large encoders can keep weights in a side file; copy any that exist.
+          find "$D" -maxdepth 1 -type f ! -name '*.onnx' ! -name '*.txt' ! -name '*.md' ! -name '*.wav' -exec cp {} pf/ \;
+          cat > pf/manifest.json <<JSON
+          {"id": "parakeet-tdt-0.6b-v2-fp16",
+           "name": "Parakeet TDT 0.6B v2 full precision (English, larger)",
+           "type": "nemo_transducer",
+           "files": {"encoder": "$ENC", "decoder": "$DEC", "joiner": "$JOI", "tokens": "tokens.txt"},
+           "vad": "silero_vad.onnx"}
+          JSON
+          ls -la pf
+          (cd pf && zip -0 -q ../models-parakeet-v2-english-fp16.zip *)
+          rm -rf "$D"
+
+          python3 -c "import json; [json.load(open(p)) for p in ('pk/manifest.json','ms/manifest.json','pf/manifest.json')]"
           sha256sum models-*.zip > SHA256SUMS.txt
           ls -lh models-*.zip
           cat SHA256SUMS.txt
@@ -67,10 +89,12 @@ jobs:
 
           - models-parakeet-v2-english.zip: recommended (most accurate, ~650 MB)
           - models-moonshine-base-english.zip: smaller and faster, less accurate
+          - models-parakeet-v2-english-fp16.zip: Parakeet at higher precision (~1.2 GB), to compare accuracy
 
           Models: NVIDIA Parakeet TDT 0.6B v2 (CC-BY-4.0), Moonshine Base (MIT), Silero VAD (MIT), converted by the sherpa-onnx project."
           if gh release view models-v1 -R "$R" >/dev/null 2>&1; then
             gh release upload models-v1 models-*.zip SHA256SUMS.txt -R "$R" --clobber
+            gh release edit models-v1 -R "$R" --notes "$NOTES"
           else
             gh release create models-v1 models-*.zip SHA256SUMS.txt -R "$R" --title "Speech models" --notes "$NOTES"
           fi
