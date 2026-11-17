@@ -41,7 +41,8 @@ data class Transcript(
     val notes: List<String>,
 ) {
     val methodSummary: String
-        get() = methods.groupingBy { it }.eachCount().entries.joinToString(" ") { "${it.key}×${it.value}" }
+        get() = methods.groupingBy { it }.eachCount().entries.joinToString(" ") { "${it.key}×${it.value}" } +
+            (notes.firstOrNull()?.let { " [${it.take(80).replace(',', ';')}]" } ?: "")
 }
 
 class DictationSession(

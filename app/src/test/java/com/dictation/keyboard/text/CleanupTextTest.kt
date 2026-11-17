@@ -63,6 +63,12 @@ class CleanupTextTest {
         // The AI changed "gonna" to "going to" and dropped a comma: wording must come from the original.
         assertNull(strong("I'm gonna go, um, now.", "I'm going to go now."))
 
+    @Test fun keepsLastCopyOfRepeatedPhrase() =
+        assertEquals(
+            "So I think we should meet on Wednesday.",
+            strong("So um I think we should, we should meet on Tuesday, no, Wednesday.", "So I think we should meet on Wednesday."),
+        )
+
     @Test fun rejectsAddedWord() =
         assertNull(strong("meet Tuesday, no, Wednesday.", "meet on Wednesday."))
 

@@ -83,13 +83,15 @@ object CleanupText {
      */
     fun deletionsFromOutput(tokens: List<Token>, aiOutput: String): Set<Int>? {
         val outCores = aiOutput.split(Regex("\\s+")).map { coreOf(it) }.filter { it.isNotEmpty() }
+        // Match from the END, so when a phrase is repeated ("we should, we should meet") the
+        // LAST copy is kept and the earlier, abandoned attempt is the one deleted.
         val kept = HashSet<Int>()
-        var j = 0
-        for (w in outCores) {
-            while (j < tokens.size && (tokens[j].isParagraph || tokens[j].core != w)) j++
-            if (j >= tokens.size) return null // a word that isn't in the original (in order)
+        var j = tokens.size - 1
+        for (w in outCores.asReversed()) {
+            while (j >= 0 && (tokens[j].isParagraph || tokens[j].core != w)) j--
+            if (j < 0) return null // a word that isn't in the original (in order)
             kept.add(j)
-            j++
+            j--
         }
         return tokens.indices.filter { !tokens[it].isParagraph && tokens[it].core.isNotEmpty() && it !in kept }.toSet()
     }
