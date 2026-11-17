@@ -17,12 +17,16 @@ import kotlin.math.sqrt
 /**
  * One dictation, from first audio chunk to final text.
  *
- *   audio chunks ──► VAD (splits at pauses) ──► phrase queue ──► recogniser (ASR thread)
- *                                                                    │
- *                                                       TranscriptAssembler ──► liveText
+ *   audio ──► VAD (splits at short pauses) ──► phrases ──► quick per-phrase transcript (live text)
+ *                                                │
+ *                                                └─► grouped into blocks of up to ~25 s, split only
+ *                                                    at longer pauses ──► block transcript (final text)
  *
- * Each phrase is transcribed while you keep talking, so when you stop, only the last phrase is
- * left to process. Audio can come from the mic or from a file (the test tool); both use this.
+ * Transcribing each short phrase on its own loses context: the model guesses words worse and
+ * treats every fragment as a sentence ("So it does put a. Good space"). So the inserted text
+ * comes from whole blocks, and per-phrase results are only used for the live preview.
+ * Blocks are transcribed while you keep talking; when you stop, only the last block is left
+ * (and pending previews are skipped), so stop-to-text stays short.
  */
 class DictationSession(
     private val engine: SpeechEngine,
@@ -30,11 +34,26 @@ class DictationSession(
     private val scope: CoroutineScope,
     private val asrDispatcher: kotlinx.coroutines.CoroutineDispatcher,
 ) {
-    private class Phrase(val samples: FloatArray, val startSec: Double, val endSec: Double)
+    private class Phrase(val samples: FloatArray, val startSec: Double, val endSec: Double) {
+        val durationSec: Double get() = endSec - startSec
+    }
+
+    private sealed interface AsrJob {
+        class Preview(val phrase: Phrase) : AsrJob
+        class Block(val samples: FloatArray, val startSec: Double, val endSec: Double) : AsrJob
+    }
 
     private val audio = Channel<FloatArray>(Channel.UNLIMITED)
-    private val phrases = Channel<Phrase>(Channel.UNLIMITED)
+    private val jobs = Channel<AsrJob>(Channel.UNLIMITED)
     private val assembler = TranscriptAssembler(paragraphPauseSec)
+
+    // Owned by the VAD coroutine.
+    private val openBlock = ArrayList<Phrase>()
+
+    // Owned by the ASR coroutine.
+    private val previewTexts = ArrayList<String>()
+
+    @Volatile private var finishing = false
 
     private val _liveText = MutableStateFlow("")
     val liveText: StateFlow<String> = _liveText
@@ -47,6 +66,7 @@ class DictationSession(
         private set
     @Volatile var asrBusyMs = 0L
         private set
+    /** Number of blocks transcribed for the final text. */
     @Volatile var phraseCount = 0
         private set
 
@@ -60,12 +80,9 @@ class DictationSession(
                 sileroVadModelConfig = SileroVadModelConfig(
                     model = engine.model.vadPath,
                     threshold = 0.5f,
-                    // A phrase ends after this much silence. Shorter = snappier live text but less
-                    // context per phrase for punctuation; 0.5 s is a reasonable middle.
                     minSilenceDuration = 0.5f,
                     minSpeechDuration = 0.25f,
                     windowSize = 512,
-                    // Force a cut if you talk this long without pausing.
                     maxSpeechDuration = 20f,
                 ),
                 sampleRate = SpeechEngine.SAMPLE_RATE,
@@ -80,21 +97,37 @@ class DictationSession(
                 }
                 vad.flush()
                 drain(vad)
+                closeBlock()
             } finally {
                 vad.release()
-                phrases.close()
+                jobs.close()
             }
         }
         asrJob = scope.launch(asrDispatcher) {
-            for (p in phrases) {
-                val t0 = System.nanoTime()
-                val text = engine.transcribe(p.samples)
-                asrBusyMs += (System.nanoTime() - t0) / 1_000_000
-                phraseCount++
-                assembler.add(text, p.startSec, p.endSec)
-                _liveText.value = assembler.text
+            for (job in jobs) {
+                when (job) {
+                    is AsrJob.Preview -> {
+                        if (finishing) continue // nobody will see it
+                        val text = timed { engine.transcribe(job.phrase.samples) }
+                        if (text.isNotBlank()) previewTexts.add(text)
+                    }
+                    is AsrJob.Block -> {
+                        val text = timed { engine.transcribe(job.samples) }
+                        phraseCount++
+                        assembler.add(text, job.startSec, job.endSec)
+                        previewTexts.clear() // this block's previews are superseded
+                    }
+                }
+                _liveText.value = listOf(assembler.text, previewTexts.joinToString(" "))
+                    .filter { it.isNotEmpty() }
+                    .joinToString(" ")
             }
         }
+    }
+
+    private inline fun timed(block: () -> String): String {
+        val t0 = System.nanoTime()
+        return block().also { asrBusyMs += (System.nanoTime() - t0) / 1_000_000 }
     }
 
     private fun drain(vad: Vad) {
@@ -103,8 +136,34 @@ class DictationSession(
             vad.pop()
             val start = seg.start.toDouble() / SpeechEngine.SAMPLE_RATE
             val end = start + seg.samples.size.toDouble() / SpeechEngine.SAMPLE_RATE
-            phrases.trySend(Phrase(seg.samples, start, end))
+            onPhrase(Phrase(seg.samples, start, end))
         }
+    }
+
+    private fun onPhrase(p: Phrase) {
+        if (openBlock.isNotEmpty()) {
+            val gap = p.startSec - openBlock.last().endSec
+            val blockLen = p.endSec - openBlock.first().startSec
+            if (gap >= BLOCK_SPLIT_PAUSE_SEC || blockLen > MAX_BLOCK_SEC) closeBlock()
+        }
+        openBlock.add(p)
+        jobs.trySend(AsrJob.Preview(p))
+    }
+
+    /** Joins the open block's phrases (with a short silence between) and queues it. */
+    private fun closeBlock() {
+        if (openBlock.isEmpty()) return
+        val gapSamples = (SpeechEngine.SAMPLE_RATE * JOIN_SILENCE_SEC).toInt()
+        val total = openBlock.sumOf { it.samples.size } + gapSamples * (openBlock.size - 1)
+        val joined = FloatArray(total)
+        var pos = 0
+        openBlock.forEachIndexed { i, ph ->
+            if (i > 0) pos += gapSamples
+            System.arraycopy(ph.samples, 0, joined, pos, ph.samples.size)
+            pos += ph.samples.size
+        }
+        jobs.trySend(AsrJob.Block(joined, openBlock.first().startSec, openBlock.last().endSec))
+        openBlock.clear()
     }
 
     /** Thread-safe; called from the mic thread. */
@@ -120,6 +179,7 @@ class DictationSession(
 
     /** No more audio: finish the last phrase and return the full text. */
     suspend fun finish(): String {
+        finishing = true
         _level.value = 0f
         audio.close()
         vadJob?.join()
@@ -131,6 +191,15 @@ class DictationSession(
         audio.close()
         vadJob?.cancel()
         asrJob?.cancel()
+    }
+
+    private companion object {
+        /** Only pauses at least this long split the final text into separately transcribed blocks. */
+        const val BLOCK_SPLIT_PAUSE_SEC = 1.5
+        /** Longest block; Parakeet handles this comfortably and it bounds stop-to-text time. */
+        const val MAX_BLOCK_SEC = 25.0
+        /** Silence put between joined phrases so the model still "hears" the pause. */
+        const val JOIN_SILENCE_SEC = 0.3
     }
 
     val modelId: String get() = engine.model.id

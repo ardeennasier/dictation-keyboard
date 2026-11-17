@@ -52,6 +52,11 @@ jobs:
           cp -v "$SRC/libsherpa-onnx-jni.so" "$DEST/"
           if [ -f "$SRC/libonnxruntime.so" ]; then cp -v "$SRC/libonnxruntime.so" "$DEST/"; fi
 
+      - name: List available Parakeet model packages (for reference)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view asr-models -R k2-fsa/sherpa-onnx --json assets --jq '.assets[] | select(.name|test("parakeet-tdt-0.6b-v[23]")) | .name + " " + ((.size/1e6)|floor|tostring) + " MB"' || true
+
       - name: Set up signing key
         env:
           SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
