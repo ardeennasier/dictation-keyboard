@@ -1,0 +1,99 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Must match the Kotlin API files vendored in app/src/main/java/com/k2fsa/sherpa/onnx.
+  SHERPA_VERSION: "2.0.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Fetch sherpa-onnx native libraries (arm64)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "Android assets in sherpa-onnx v${SHERPA_VERSION}:"
+          gh release view "v${SHERPA_VERSION}" -R k2-fsa/sherpa-onnx --json assets --jq '.assets[].name' | grep -iE 'android|\.aar$' || true
+          mkdir -p /tmp/sherpa && cd /tmp/sherpa
+          if gh release download "v${SHERPA_VERSION}" -R k2-fsa/sherpa-onnx -p "sherpa-onnx-v${SHERPA_VERSION}-android.tar.bz2"; then
+            tar xjf "sherpa-onnx-v${SHERPA_VERSION}-android.tar.bz2"
+            SRC=jniLibs/arm64-v8a
+          elif gh release download "v${SHERPA_VERSION}" -R k2-fsa/sherpa-onnx -p "sherpa-onnx-${SHERPA_VERSION}.aar" -O sherpa.aar; then
+            unzip -q sherpa.aar 'jni/arm64-v8a/*'
+            SRC=jni/arm64-v8a
+          else
+            gh release download "v${SHERPA_VERSION}" -R k2-fsa/sherpa-onnx -p "sherpa-onnx-static-link-onnxruntime-${SHERPA_VERSION}.aar" -O sherpa.aar
+            unzip -q sherpa.aar 'jni/arm64-v8a/*'
+            SRC=jni/arm64-v8a
+          fi
+          ls -la "$SRC"
+          DEST="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$DEST"
+          cp -v "$SRC/libsherpa-onnx-jni.so" "$DEST/"
+          if [ -f "$SRC/libonnxruntime.so" ]; then cp -v "$SRC/libonnxruntime.so" "$DEST/"; fi
+
+      - name: Set up signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+        run: |
+          if [ -n "${KEYSTORE_B64}" ]; then
+            echo "${KEYSTORE_B64}" | base64 -d > /tmp/release.jks
+            echo "SIGNING_KEYSTORE_PATH=/tmp/release.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No SIGNING_KEYSTORE_B64 secret: using a throwaway debug key. Updates won't install over each other."
+          fi
+
+      - name: Unit tests and build
+        env:
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          gradle --no-daemon testReleaseUnitTest assembleRelease \
+            -PversionCode=${{ github.run_number }} \
+            -PmodelsUrl="https://github.com/${{ github.repository }}/releases/tag/models-v1"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports
+          path: app/build/reports/tests/
+          if-no-files-found: ignore
+
+      - name: Publish APK to the "apk-latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cp app/build/outputs/apk/release/app-release.apk dictation-keyboard.apk
+          SUM=$(sha256sum dictation-keyboard.apk | cut -d' ' -f1)
+          NOTES="Build ${{ github.run_number }} from commit ${{ github.sha }}.
+
+          SHA-256: ${SUM}
+
+          Install: open this page on your phone, tap dictation-keyboard.apk, allow installing from your browser if asked."
+          if ! gh release view apk-latest -R "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create apk-latest -R "${{ github.repository }}" --title "Latest APK" --notes "$NOTES" --prerelease --target "${{ github.sha }}"
+          fi
+          gh release upload apk-latest dictation-keyboard.apk -R "${{ github.repository }}" --clobber
+          gh release edit apk-latest -R "${{ github.repository }}" --notes "$NOTES"

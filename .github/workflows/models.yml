@@ -1,0 +1,73 @@
+name: Package speech models
+
+# Run this once by hand (Actions tab > Package speech models > Run workflow).
+# It downloads the open models from the sherpa-onnx project, adds the manifest the app expects,
+# and attaches them to a "models-v1" release you can download on your phone.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BASE=https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models
+          curl -fsSL -o silero_vad.onnx "$BASE/silero_vad.onnx"
+
+          # 1. Parakeet TDT 0.6B v2, English only: most accurate.
+          curl -fsSL "$BASE/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2" | tar xj
+          D=sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8
+          ls -la "$D"
+          mkdir pk
+          cp "$D/encoder.int8.onnx" "$D/decoder.int8.onnx" "$D/joiner.int8.onnx" "$D/tokens.txt" silero_vad.onnx pk/
+          cat > pk/manifest.json <<'JSON'
+          {"id": "parakeet-tdt-0.6b-v2-int8",
+           "name": "Parakeet TDT 0.6B v2 (English, most accurate)",
+           "type": "nemo_transducer",
+           "files": {"encoder": "encoder.int8.onnx", "decoder": "decoder.int8.onnx",
+                     "joiner": "joiner.int8.onnx", "tokens": "tokens.txt"},
+           "vad": "silero_vad.onnx"}
+          JSON
+          (cd pk && zip -0 -q ../models-parakeet-v2-english.zip *)
+
+          # 2. Moonshine Base, English only: smaller and faster, less accurate.
+          curl -fsSL "$BASE/sherpa-onnx-moonshine-base-en-int8.tar.bz2" | tar xj
+          D=sherpa-onnx-moonshine-base-en-int8
+          ls -la "$D"
+          mkdir ms
+          cp "$D/preprocess.onnx" "$D/encode.int8.onnx" "$D/uncached_decode.int8.onnx" "$D/cached_decode.int8.onnx" "$D/tokens.txt" silero_vad.onnx ms/
+          cat > ms/manifest.json <<'JSON'
+          {"id": "moonshine-base-en-int8",
+           "name": "Moonshine Base (English, fast)",
+           "type": "moonshine",
+           "files": {"preprocessor": "preprocess.onnx", "encoder": "encode.int8.onnx",
+                     "uncachedDecoder": "uncached_decode.int8.onnx",
+                     "cachedDecoder": "cached_decode.int8.onnx", "tokens": "tokens.txt"},
+           "vad": "silero_vad.onnx"}
+          JSON
+          (cd ms && zip -0 -q ../models-moonshine-base-english.zip *)
+
+          python3 -c "import json; [json.load(open(p)) for p in ('pk/manifest.json','ms/manifest.json')]"
+          sha256sum models-*.zip > SHA256SUMS.txt
+          ls -lh models-*.zip
+          cat SHA256SUMS.txt
+
+          R="${{ github.repository }}"
+          NOTES="Speech models for the Dictation Keyboard. Download ONE zip on your phone, then import it in the app.
+
+          - models-parakeet-v2-english.zip: recommended (most accurate, ~650 MB)
+          - models-moonshine-base-english.zip: smaller and faster, less accurate
+
+          Models: NVIDIA Parakeet TDT 0.6B v2 (CC-BY-4.0), Moonshine Base (MIT), Silero VAD (MIT), converted by the sherpa-onnx project."
+          if gh release view models-v1 -R "$R" >/dev/null 2>&1; then
+            gh release upload models-v1 models-*.zip SHA256SUMS.txt -R "$R" --clobber
+          else
+            gh release create models-v1 models-*.zip SHA256SUMS.txt -R "$R" --title "Speech models" --notes "$NOTES"
+          fi
